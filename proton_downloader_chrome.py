@@ -1,6 +1,6 @@
 import os
 import time
-import random # <--- NEW: Import random library
+import random
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -12,8 +12,11 @@ from selenium.common.exceptions import TimeoutException, ElementClickIntercepted
 MODAL_BACKDROP_SELECTOR = (By.CLASS_NAME, "modal-two-backdrop")
 CONFIRM_BUTTON_SELECTOR = (By.CSS_SELECTOR, ".button-solid-norm:nth-child(2)")
 
-# Define the download path accessible by GitHub Actions
+# Constants
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloaded_configs")
+TARGET_COUNTRY_NAME = "United States"
+MAX_DOWNLOADS_PER_SESSION = 20 # <--- NEW: Maximum downloads before relogin
+RELOGIN_DELAY = 120 # Delay in seconds between sessions to cool down the IP
 
 # Create the download directory if it doesn't exist
 if not os.path.exists(DOWNLOAD_DIR):
@@ -93,7 +96,27 @@ class ProtonVPN:
             print(f"Error Navigating to Downloads: {e}")
             return False
 
-    def download_configurations(self):
+    def logout(self):
+        try:
+            self.driver.get("https://account.protonvpn.com/logout") # Direct logout link is faster
+            time.sleep(3)
+            print("Logout Successful.")
+            return True
+        except Exception as e:
+            # If direct link fails, try clicking
+            try:
+                self.driver.find_element(By.CSS_SELECTOR, ".p-1").click()
+                time.sleep(1)
+                self.driver.find_element(By.CSS_SELECTOR, ".mb-4 > .button").click()
+                time.sleep(2)
+                print("Logout Successful via UI.")
+                return True
+            except Exception as e:
+                print(f"Error Logout: {e}")
+                return False
+
+    def process_downloads(self):
+        """Processes downloads for the target country with a limit per call."""
         try:
             self.driver.execute_script("window.scrollTo(0,0)")
             time.sleep(2)
@@ -108,9 +131,8 @@ class ProtonVPN:
             countries = self.driver.find_elements(By.CSS_SELECTOR, ".mb-6 details")
             print(f"Found {len(countries)} total countries to check.")
             
-            # --- TARGETING ONLY UNITED STATES ---
-            TARGET_COUNTRY_NAME = "United States"
-            found_target = False
+            download_counter = 0
+            all_downloads_finished = True # Assume true until we start downloading
 
             for country in countries:
                 try:
@@ -118,12 +140,9 @@ class ProtonVPN:
                     country_name = country_name_element.text.split('\n')[0].strip()
                     
                     if TARGET_COUNTRY_NAME not in country_name:
-                        print(f"Skipping country: {country_name}")
                         continue
                     
-                    # Target country found, proceed with download
-                    found_target = True
-                    print(f"--- Starting download for target country: {country_name} ---")
+                    print(f"--- Processing target country: {country_name} ---")
 
                     self.driver.execute_script("arguments[0].open = true;", country)
                     time.sleep(0.5)
@@ -132,87 +151,86 @@ class ProtonVPN:
 
                     for index, btn in enumerate(buttons):
                         
-                        # Generate random delay between 60 and 90 seconds
-                        random_delay = random.randint(60, 90) # <--- NEW: Random delay 60-90s
+                        # --- NEW: Check session limit ---
+                        if download_counter >= MAX_DOWNLOADS_PER_SESSION:
+                            print(f"Session limit reached ({MAX_DOWNLOADS_PER_SESSION}). Stopping for relogin...")
+                            all_downloads_finished = False # We still have more to download
+                            return all_downloads_finished
+                        
+                        random_delay = random.randint(60, 90)
                         
                         try:
                             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
                             time.sleep(0.5)
 
-                            # 1. Click to open the modal
                             ActionChains(self.driver).move_to_element(btn).click().perform()
 
-                            # 2. Wait explicitly for the confirm button to be clickable (Modal appeared)
-                            confirm_btn = WebDriverWait(self.driver, 30).until( # Increased wait to 30s
+                            confirm_btn = WebDriverWait(self.driver, 30).until(
                                 EC.element_to_be_clickable(CONFIRM_BUTTON_SELECTOR)
                             )
                             confirm_btn.click()
 
-                            # 3. CRITICAL: Wait for the modal backdrop to disappear 
-                            WebDriverWait(self.driver, 30).until( # Increased wait to 30s
+                            WebDriverWait(self.driver, 30).until(
                                 EC.invisibility_of_element_located(MODAL_BACKDROP_SELECTOR)
                             )
                             
-                            print(f"Successfully downloaded config {index + 1} for {country_name}.")
-                            print(f"Waiting for {random_delay} seconds before next download to avoid rate limit...")
-
-                            # 4. Apply the random, long delay
+                            download_counter += 1
+                            print(f"Successfully downloaded config {index + 1} (Total: {download_counter}). Waiting {random_delay}s...")
                             time.sleep(random_delay) 
 
                         except (TimeoutException, ElementClickInterceptedException) as e:
-                            print(f"Error downloading file {index + 1} for {country_name}. Timeout or Interception. Retrying cleanup... Error: {e}")
-                            try:
-                                WebDriverWait(self.driver, 5).until(
-                                    EC.invisibility_of_element_located(MODAL_BACKDROP_SELECTOR)
-                                )
-                            except:
-                                print("Warning: Backdrop cleanup failed, continuing anyway.")
-                            
-                            # Apply a longer fixed delay if an error occurs
-                            time.sleep(90)
-                            continue
+                            print(f"CRITICAL ERROR: Failed to download config {index + 1}. Rate limit or session issue detected. Shutting down session.")
+                            all_downloads_finished = False
+                            return all_downloads_finished
                         
                         except Exception as e:
-                            print(f"General error during download {index + 1} for {country_name}: {e}")
-                            time.sleep(90)
-                            continue
+                            print(f"General error during download {index + 1}: {e}. Shutting down session.")
+                            all_downloads_finished = False
+                            return all_downloads_finished
 
-                except Exception as e:
-                    print(f"Error processing country block: {e}")
-                    continue
-
-            if not found_target:
-                print(f"Warning: The target country '{TARGET_COUNTRY_NAME}' was not found on the page or download loop was skipped.")
-
-            return True
+            return all_downloads_finished # Returns True if it finished all loops
 
         except Exception as e:
             print(f"Error in main download loop: {e}")
             return False
 
-    def logout(self):
-        try:
-            self.driver.find_element(By.CSS_SELECTOR, ".p-1").click()
-            time.sleep(1)
-            self.driver.find_element(By.CSS_SELECTOR, ".mb-4 > .button").click()
-            time.sleep(2)
-            print("Logout Successful.")
-            return True
-        except Exception as e:
-            print(f"Error Logout: {e}")
-            return False
-
     def run(self, username, password):
+        """Executes the full automation workflow with relogin cycle."""
+        
+        all_downloads_finished = False
+        session_count = 0
+        
         try:
-            self.setup()
-            if self.login(username, password):
+            while not all_downloads_finished and session_count < 10: # Limit to 10 sessions (200 downloads) for safety
+                
+                session_count += 1
+                print(f"\n###################### Starting Session {session_count} ######################")
+                
+                # 1. Setup Driver and Login
+                self.setup()
+                if not self.login(username, password):
+                    print("Failed to log in. Aborting run.")
+                    break
+                
+                # 2. Navigate and Download
                 if self.navigate_to_downloads():
-                    self.download_configurations()
+                    all_downloads_finished = self.process_downloads()
+                
+                # 3. Logout
                 self.logout()
+                self.teardown() # Fully close the browser instance
+                
+                if all_downloads_finished:
+                    print("\n###################### All configurations downloaded successfully! ######################")
+                else:
+                    print(f"Session {session_count} completed. Waiting {RELOGIN_DELAY} seconds before relogging in...")
+                    time.sleep(RELOGIN_DELAY) # Wait 2 minutes before trying again
+
         except Exception as e:
-            print(f"Runtime Error: {e}")
+            print(f"Runtime Error in main loop: {e}")
         finally:
             self.teardown()
+
 
 if __name__ == "__main__":
     USERNAME = os.environ.get("VPN_USERNAME")
